@@ -1,0 +1,85 @@
+{
+    "project": {
+        "name": "TotalGadgets",
+        "type": "exe",
+        "architecture": "x64",
+        "output_dir": "build"
+    },
+    "compiler": {
+        "standard": "c++20",
+        "runtime": "static",
+        "char_set": "unicode",
+        "additional_flags": [
+            "/DCAPSTONE_STATIC",
+            "/DCAPSTONE_HAS_X86",
+            "/DCAPSTONE_HAS_ARM",
+            "/DCAPSTONE_HAS_ARM64",
+            "/DCAPSTONE_USE_SYS_DYN_MEM"
+        ],
+        "warnings": {
+            "level": 4,
+            "as_errors": false,
+            "disabled": ["4005", "4100", "4206", "4244", "4245", "4267", "4310", "4456", "4996"]
+        },
+        "conformance": {
+            "permissive": false,
+            "cplusplus_macro": true
+        }
+    },
+    "linker": {
+        "subsystem": "windows",
+        "libraries": [
+            "librp.lib",
+            "comctl32.lib",
+            "gdi32.lib",
+            "user32.lib",
+            "shell32.lib",
+            "ole32.lib",
+            "comdlg32.lib",
+            "advapi32.lib"
+        ],
+        "library_paths": [
+            "../librp/build/Release"
+        ]
+    },
+    "sources": {
+        "include_dirs": [
+            "src",
+            "../librp/src/rp",
+            "../librp/src/third_party/capstone/include",
+            "../librp/src/third_party/capstone",
+            "../vcbuild/gui/external/Include"
+        ],
+        "explicit_sources": [
+            "src/Main.cpp",
+            "src/MainDlg.cpp",
+            "src/Scanner.cpp",
+            "src/Mutator.cpp",
+            "../librp/src/third_party/capstone/cs.c",
+            "../librp/src/third_party/capstone/MCInst.c",
+            "../librp/src/third_party/capstone/MCInstrDesc.c",
+            "../librp/src/third_party/capstone/MCRegisterInfo.c",
+            "../librp/src/third_party/capstone/SStream.c",
+            "../librp/src/third_party/capstone/utils.c",
+            "../librp/src/third_party/capstone/arch/X86/X86ATTInstPrinter.c",
+            "../librp/src/third_party/capstone/arch/X86/X86Disassembler.c",
+            "../librp/src/third_party/capstone/arch/X86/X86DisassemblerDecoder.c",
+            "../librp/src/third_party/capstone/arch/X86/X86IntelInstPrinter.c",
+            "../librp/src/third_party/capstone/arch/X86/X86Mapping.c",
+            "../librp/src/third_party/capstone/arch/X86/X86Module.c",
+            "../librp/src/third_party/capstone/arch/ARM/ARMDisassembler.c",
+            "../librp/src/third_party/capstone/arch/ARM/ARMInstPrinter.c",
+            "../librp/src/third_party/capstone/arch/ARM/ARMMapping.c",
+            "../librp/src/third_party/capstone/arch/ARM/ARMModule.c",
+            "../librp/src/third_party/capstone/arch/AArch64/AArch64BaseInfo.c",
+            "../librp/src/third_party/capstone/arch/AArch64/AArch64Disassembler.c",
+            "../librp/src/third_party/capstone/arch/AArch64/AArch64InstPrinter.c",
+            "../librp/src/third_party/capstone/arch/AArch64/AArch64Mapping.c",
+            "../librp/src/third_party/capstone/arch/AArch64/AArch64Module.c"
+        ]
+    },
+    "resources": {
+        "enabled": true,
+        "files": ["src/TotalGadgets.rc"]
+    }
+}

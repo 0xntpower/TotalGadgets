@@ -1,0 +1,61 @@
+#include <windows.h>
+#include "Resource.h"
+
+IDR_MAINFRAME ICON "../assets/icon.ico"
+
+IDD_MAINDLG DIALOGEX 0, 0, 470, 395
+STYLE DS_SETFONT | DS_CENTER | WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
+      WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
+CAPTION "Total Gadgets"
+FONT 9, "Segoe UI"
+BEGIN
+    // --- Paths ---
+    GROUPBOX        "Input / Output", IDC_GRP_PATHS, 8, 4, 454, 52
+
+    RTEXT           "PE Folder:", -1, 14, 19, 44, 8
+    EDITTEXT        IDC_FOLDER_PATH, 62, 17, 361, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "...", IDC_BROWSE_FOLDER, 427, 17, 28, 14
+
+    RTEXT           "Output File:", -1, 14, 37, 44, 8
+    EDITTEXT        IDC_OUTPUT_PATH, 62, 35, 361, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "...", IDC_BROWSE_OUTPUT, 427, 35, 28, 14
+
+    // --- Search Options ---
+    GROUPBOX        "Search Options", IDC_GRP_SEARCH, 8, 62, 270, 76
+
+    RTEXT           "Max length:", -1, 14, 78, 48, 8
+    EDITTEXT        IDC_MAX_GADGET_LEN, 66, 76, 26, 14, ES_NUMBER | ES_CENTER
+    CONTROL         "Unique gadgets only", IDC_UNIQUE_ONLY, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 152, 78, 82, 10
+
+    RTEXT           "Threads:", -1, 14, 96, 48, 8
+    EDITTEXT        IDC_MAX_THREADS, 66, 94, 26, 14, ES_NUMBER | ES_CENTER
+    CONTROL         "Allow branches", IDC_ALLOW_BRANCHES, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 152, 92, 66, 10
+
+    RTEXT           "Bad bytes:", -1, 14, 114, 48, 8
+    EDITTEXT        IDC_BAD_BYTES, 66, 112, 62, 14, ES_AUTOHSCROLL
+    CONTROL         "Include subfolders", IDC_INCLUDE_SUBFOLDERS, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 152, 106, 78, 10
+
+    // --- Mutation ---
+    GROUPBOX        "Gadget Mutation", IDC_GRP_MUTATION, 286, 62, 176, 48
+    CONTROL         "Enable mutation", IDC_ENABLE_MUTATION, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 296, 78, 68, 10
+    RTEXT           "Max offset:", IDC_LBL_MAXOFFSET, 372, 78, 42, 8
+    EDITTEXT        IDC_MAX_MUTATION_OFFSET, 418, 76, 22, 14, ES_NUMBER | ES_CENTER
+
+    // --- Scan button ---
+    DEFPUSHBUTTON   "Scan", IDC_SCAN, 286, 116, 176, 22
+
+    // --- Progress ---
+    LTEXT           "Idle", IDC_STATUS, 8, 148, 300, 10, SS_ENDELLIPSIS
+    RTEXT           "", IDC_ELAPSED, 312, 148, 60, 10
+    RTEXT           "", IDC_GADGET_COUNT, 386, 148, 76, 10
+    CONTROL         "", IDC_PROGRESS, "msctls_progress32", 0, 8, 160, 454, 10
+
+    // --- Log ---
+    GROUPBOX        "Log", IDC_GRP_LOG, 8, 174, 454, 215
+    EDITTEXT        IDC_LOG, 14, 186, 442, 197, ES_MULTILINE | ES_AUTOVSCROLL |
+                    ES_READONLY | WS_VSCROLL
+END

@@ -1,0 +1,3 @@
+[submodule "vcbuild"]
+	path = vcbuild
+	url = https://github.com/0xntpower/vcbuild.git
