@@ -114,17 +114,29 @@ void MainDlg::OnGetMinMaxInfo(LPMINMAXINFO mmi) {
 }
 
 void MainDlg::OnBrowseFolder(UINT, int, CWindow) {
-    CFolderDialog dlg(m_hWnd, _T("Select folder containing PE files"));
-    if (dlg.DoModal() == IDOK)
-        SetDlgItemText(IDC_FOLDER_PATH, dlg.GetFolderPath());
+    CShellFileOpenDialog dlg(nullptr, FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM,
+                             nullptr, nullptr, 0);
+    dlg.GetPtr()->SetTitle(L"Select folder containing PE files");
+    if (dlg.DoModal(m_hWnd) == IDOK) {
+        wchar_t path[MAX_PATH] = {};
+        dlg.GetFilePath(path, MAX_PATH);
+        ::SetDlgItemTextW(m_hWnd, IDC_FOLDER_PATH, path);
+    }
 }
 
 void MainDlg::OnBrowseOutput(UINT, int, CWindow) {
-    CFileDialog dlg(FALSE, _T("txt"), _T("gadgets.txt"),
-                    OFN_OVERWRITEPROMPT,
-                    _T("Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0"));
-    if (dlg.DoModal() == IDOK)
-        SetDlgItemText(IDC_OUTPUT_PATH, dlg.m_szFileName);
+    const COMDLG_FILTERSPEC filter[] = {
+        { L"Text Files", L"*.txt" },
+        { L"All Files",  L"*.*" }
+    };
+    CShellFileSaveDialog dlg(L"gadgets.txt", FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM,
+                             L"txt", filter, _countof(filter));
+    dlg.GetPtr()->SetTitle(L"Save gadget output");
+    if (dlg.DoModal(m_hWnd) == IDOK) {
+        wchar_t path[MAX_PATH] = {};
+        dlg.GetFilePath(path, MAX_PATH);
+        ::SetDlgItemTextW(m_hWnd, IDC_OUTPUT_PATH, path);
+    }
 }
 
 void MainDlg::OnScan(UINT, int, CWindow) {
