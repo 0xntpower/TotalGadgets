@@ -25,7 +25,6 @@ CAppModule _Module;
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "advapi32.lib")
 
-#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);

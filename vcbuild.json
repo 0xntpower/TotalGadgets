@@ -39,7 +39,7 @@
             "advapi32.lib"
         ],
         "library_paths": [
-            "../librp/build/Release"
+            "../librp/build-${ARCH}/Release"
         ]
     },
     "sources": {
