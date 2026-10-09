@@ -45,16 +45,24 @@
     "sources": {
         "include_dirs": [
             "src",
+            "src/App",
+            "src/Core",
             "../librp/src/rp",
             "../librp/src/third_party/capstone/include",
             "../librp/src/third_party/capstone",
             "../vcbuild/gui/external/Include"
         ],
         "explicit_sources": [
-            "src/Main.cpp",
-            "src/MainDlg.cpp",
-            "src/Scanner.cpp",
-            "src/Mutator.cpp",
+            "src/App/Main.cpp",
+            "src/App/Cli.cpp",
+            "src/App/MainDlg.cpp",
+            "src/Core/Util.cpp",
+            "src/Core/PeFile.cpp",
+            "src/Core/Engine.cpp",
+            "src/Core/Mutator.cpp",
+            "src/Core/Sink.cpp",
+            "src/Core/Settings.cpp",
+            "src/Core/SelfTest.cpp",
             "../librp/src/third_party/capstone/cs.c",
             "../librp/src/third_party/capstone/MCInst.c",
             "../librp/src/third_party/capstone/MCInstrDesc.c",
@@ -80,6 +88,6 @@
     },
     "resources": {
         "enabled": true,
-        "files": ["src/TotalGadgets.rc"]
+        "files": ["src/App/TotalGadgets.rc"]
     }
 }
