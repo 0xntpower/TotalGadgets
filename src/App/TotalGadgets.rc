@@ -1,0 +1,91 @@
+#include <windows.h>
+#include "Resource.h"
+
+IDR_MAINFRAME ICON "../assets/icon.ico"
+
+1 RT_MANIFEST "TotalGadgets.manifest"
+
+IDD_MAINDLG DIALOGEX 0, 0, 470, 500
+STYLE DS_SETFONT | DS_CENTER | WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
+      WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
+CAPTION "Total Gadgets v2"
+FONT 9, "Segoe UI"
+BEGIN
+    // --- Input ---
+    GROUPBOX        "Input", IDC_GRP_INPUT, 8, 4, 454, 54
+
+    RTEXT           "Folder:", -1, 14, 19, 32, 8
+    COMBOBOX        IDC_FOLDER_COMBO, 50, 17, 373, 120,
+                    CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON      "...", IDC_BROWSE_FOLDER, 427, 17, 28, 14
+
+    // --- Output ---
+    GROUPBOX        "Output", IDC_GRP_OUTPUT, 8, 62, 454, 54
+
+    RTEXT           "Output:", -1, 14, 77, 32, 8
+    EDITTEXT        IDC_OUTPUT_PATH, 50, 75, 373, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "...", IDC_BROWSE_OUTPUT, 427, 75, 28, 14
+
+    RTEXT           "Format:", -1, 14, 96, 32, 8
+    COMBOBOX        IDC_FORMAT, 50, 94, 62, 80, CBS_DROPDOWNLIST | WS_TABSTOP
+    CONTROL         "One file per module", IDC_SPLIT, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 120, 95, 88, 10
+    CONTROL         "Subfolders", IDC_RECURSIVE, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 212, 95, 58, 10
+    CONTROL         "ELF too", IDC_ELF, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 274, 95, 46, 10
+
+    // --- Search Options ---
+    GROUPBOX        "Search Options", IDC_GRP_SEARCH, 8, 122, 270, 62
+
+    RTEXT           "Max len:", -1, 14, 137, 34, 8
+    EDITTEXT        IDC_MAX_GADGET_LEN, 52, 135, 26, 14, ES_NUMBER | ES_CENTER
+    RTEXT           "Threads:", -1, 82, 137, 34, 8
+    EDITTEXT        IDC_MAX_THREADS, 120, 135, 26, 14, ES_NUMBER | ES_CENTER
+    CONTROL         "Unique only", IDC_UNIQUE_ONLY, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 162, 137, 62, 10
+    CONTROL         "Branches", IDC_ALLOW_BRANCHES, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 162, 151, 52, 10
+
+    CONTROL         "Branches", IDC_MUTATE_BRANCHES, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 296, 151, 52, 10
+    EDITTEXT        IDC_BAD_BYTES, 52, 156, 94, 14, ES_AUTOHSCROLL
+
+    // --- Mutation ---
+    GROUPBOX        "Mutation (capstone 2nd decoder)", IDC_GRP_MUTATION,
+                    286, 122, 176, 62
+    CONTROL         "Enabled", IDC_ENABLE_MUTATION, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 296, 137, 50, 10
+    CONTROL         "Branches", IDC_LBL_MAXOFFSET, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 296, 151, 52, 10
+    RTEXT           "Lookback:", -1, 354, 137, 38, 8
+    EDITTEXT        IDC_MAX_MUTATION_OFFSET, 396, 135, 26, 14,
+                    ES_NUMBER | ES_CENTER
+
+    // --- Scan / Cancel + status ---
+    DEFPUSHBUTTON   "Scan", IDC_SCAN, 8, 190, 88, 20
+    LTEXT           "Idle", IDC_STATUS, 104, 178, 230, 8, SS_ENDELLIPSIS
+    RTEXT           "", IDC_ELAPSED, 340, 178, 60, 8
+    RTEXT           "", IDC_ETA, 340, 190, 60, 8
+    RTEXT           "", IDC_GADGET_COUNT, 404, 178, 58, 8
+    CONTROL         "", IDC_PROGRESS, "msctls_progress32", 0, 8, 214, 454, 10
+
+    // --- Results / Log ---
+    CONTROL         "", IDC_TAB, "SysTabControl32", 0, 8, 228, 454, 250
+
+    // Gadgets pane (direct children; visibility follows the tab)
+    LTEXT           "Filter:", -1, 16, 252, 26, 8
+    EDITTEXT        IDC_FILTER, 44, 250, 150, 14, ES_AUTOHSCROLL
+    COMBOBOX        IDC_MODULE_FILTER, 200, 250, 130, 200,
+                    CBS_DROPDOWNLIST | WS_TABSTOP
+    PUSHBUTTON      "Copy", IDC_COPY, 336, 249, 40, 14
+    RTEXT           "", IDC_RESULTS_COUNT, 380, 252, 74, 8
+    CONTROL         "", IDC_LIST, "SysListView32",
+                    LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS |
+                    LVS_SINGLESEL | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL,
+                    16, 268, 438, 200
+
+    // Log pane (same rect as the list; hidden initially)
+    EDITTEXT        IDC_LOG, 16, 268, 438, 200, ES_MULTILINE | ES_AUTOVSCROLL |
+                    ES_READONLY | WS_VSCROLL
+END
