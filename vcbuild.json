@@ -9,12 +9,17 @@
         "standard": "c++20",
         "runtime": "static",
         "char_set": "unicode",
+        "optimization": "full",
+        "debug_info": "auto",
+        "function_level_linking": true,
+        "string_pooling": true,
         "additional_flags": [
             "/DCAPSTONE_STATIC",
             "/DCAPSTONE_HAS_X86",
             "/DCAPSTONE_HAS_ARM",
             "/DCAPSTONE_HAS_ARM64",
-            "/DCAPSTONE_USE_SYS_DYN_MEM"
+            "/DCAPSTONE_USE_SYS_DYN_MEM",
+            "/GA"
         ],
         "warnings": {
             "level": 4,
@@ -28,6 +33,8 @@
     },
     "linker": {
         "subsystem": "windows",
+        "lto": "on",
+        "strip_unreferenced": "on",
         "libraries": [
             "librp.lib",
             "comctl32.lib",
