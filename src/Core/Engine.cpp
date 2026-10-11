@@ -124,18 +124,16 @@ void Engine::ScanPhase(const std::vector<std::filesystem::path>& files,
             const std::string name = util::ToUtf8(filePath.filename().wstring());
             progress_.SetCurrentFile(filePath.filename().wstring());
 
-            // Validate magic before spending time on a full parse.
-            std::string sniffArch;
-            const auto kind = util::SniffBinaryKind(filePath, sniffArch);
-            if (kind == util::BinaryKind::Unknown) {
+            // One sniff: kind + arch + size from a single file open.
+            const util::BinarySniff sniff = util::SniffBinary(filePath);
+            if (sniff.kind == util::BinaryKind::Unknown) {
                 std::lock_guard<std::mutex> lock(logMu);
                 Log("[SKIP] " + name + " - unsupported binary format");
                 stats.filesSkipped++;
                 continue;
             }
 
-            std::error_code ec;
-            const uint64_t fileSize = std::filesystem::file_size(filePath, ec);
+            const uint64_t fileSize = sniff.fileSize;
 
             // librp takes a narrow path; stage Unicode-hostile paths.
             std::filesystem::path staged;
@@ -165,7 +163,7 @@ void Engine::ScanPhase(const std::vector<std::filesystem::path>& files,
             ModuleGadgets mg;
             mg.moduleName = name;
             mg.filePath = filePath;
-            mg.arch = sniffArch.empty() ? kArchUnknown : sniffArch;
+            mg.arch = sniff.arch.empty() ? kArchUnknown : sniff.arch;
 
             if (!librp::Succeeded(result)) {
                 std::lock_guard<std::mutex> lock(logMu);
@@ -178,8 +176,9 @@ void Engine::ScanPhase(const std::vector<std::filesystem::path>& files,
             mg.gadgets = std::move(librp::GetValue(result));
 
             // PE metadata for the mutation pass + address-width formatting.
-            if (kind == util::BinaryKind::Pe) {
-                PeInfo pe = ParsePeFile(staged.empty() ? filePath : staged);
+            // Header-only: a few KB instead of re-reading the whole file.
+            if (sniff.kind == util::BinaryKind::Pe) {
+                PeInfo pe = ParsePeFile(filePath, /*headersOnly=*/true);
                 if (pe.Ok()) {
                     mg.imageBase = pe.imageBase;
                     mg.arch = pe.arch == PeInfo::Arch::X64 ? kArchX64 : kArchX86;
@@ -260,23 +259,11 @@ void Engine::MutationPhase(ScanStats& stats) {
 
             auto done = [&] { progress_.AddFileDone(0, 0); };
 
-            // Stage the path if librp's narrow boundary requires it.
-            std::filesystem::path staged;
-            std::string librpPath;
-            try {
-                librpPath = util::ToLibrpPath(mod->filePath, staged);
-            } catch (const std::exception&) {
-                std::lock_guard<std::mutex> lock(logMu);
-                Log("[MUTATE] " + mod->moduleName + " - path cannot be encoded");
-                done();
-                continue;
-            }
-            if (!staged.empty()) {
-                std::lock_guard<std::mutex> lock(sinkMu_);
-                stagedFiles_.push_back(staged);
-            }
-
-            PeInfo pe = ParsePeFile(staged.empty() ? mod->filePath : staged);
+            // No staging needed here: the PE parser reads wide paths
+            // directly, so mutate from the original file. (The previous
+            // version computed a librp narrow path it never used and could
+            // trigger a second full file copy for Unicode-hostile paths.)
+            PeInfo pe = ParsePeFile(mod->filePath);
             if (!pe.Ok()) {
                 std::lock_guard<std::mutex> lock(logMu);
                 Log("[MUTATE] " + mod->moduleName + " - " + pe.error);

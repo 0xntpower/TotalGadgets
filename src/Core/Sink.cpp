@@ -1,6 +1,7 @@
 #include "Sink.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 
@@ -17,6 +18,11 @@
 namespace gadgets {
 
 namespace {
+
+// Sink I/O buffer: one WriteFile-sized chunk per module instead of one per
+// stream op. 1 MB keeps multi-hundred-thousand-gadget modules to a handful
+// of syscalls.
+constexpr size_t kIoBufferSize = 1 << 20;
 
 std::string JsonEscape(const std::string& s) {
     std::string out;
@@ -71,30 +77,152 @@ std::string SanitizeName(const std::string& name) {
     return out.empty() ? "module" : out;
 }
 
+void AppendAddress(std::string& out, uint64_t address, bool is64) {
+    char buf[24];
+    if (is64)
+        std::snprintf(buf, sizeof(buf), "0x%016llx",
+                      static_cast<unsigned long long>(address));
+    else
+        std::snprintf(buf, sizeof(buf), "0x%08llx",
+                      static_cast<unsigned long long>(address));
+    out += buf;
+}
+
+// Opens an ofstream over a caller-owned I/O buffer. pubsetbuf before open is
+// the only portable form; the buffer must outlive the stream. Sinks declare
+// their buffer member before the stream so destruction order is safe.
+bool OpenInto(std::ofstream& out, const std::filesystem::path& path,
+              char* buf, size_t bufSize) {
+    if (buf)
+        out.rdbuf()->pubsetbuf(buf, static_cast<std::streamsize>(bufSize));
+    out.open(path, std::ios::binary);
+    return out.good();
+}
+
+// ---------------------------------------------------------------------------
+// Shared module formatting (identical bytes for merged and split outputs)
+// ---------------------------------------------------------------------------
+
+std::string FormatTextHead(const ModuleGadgets& mod, bool mutated) {
+    std::string head;
+    head.reserve(mod.gadgets.size() * 96 + 64);
+
+    std::string prefix = "[";
+    prefix += mod.moduleName;
+    prefix += mutated ? ":mutated]" : "]";
+    const bool is64 = mod.arch != kArchX86 && mod.arch != kArchArm;
+
+    head += "; --- ";
+    head += prefix;
+    head += " (";
+    head += std::to_string(mod.gadgets.size());
+    head += " gadgets) ---\n";
+    for (const auto& g : mod.gadgets) {
+        head += prefix;
+        head += ' ';
+        AppendAddress(head, g.address, is64);
+        head += ": ";
+        head += g.disassembly;
+        head += " (";
+        head += std::to_string(g.numOccurrences);
+        head += " found)\n";
+    }
+    head += "\n";
+    return head;
+}
+
+std::string FormatJsonHead(const ModuleGadgets& mod, bool mutated) {
+    std::string head;
+    head.reserve(mod.gadgets.size() * 128 + 128);
+
+    if (mutated) {
+        head += "{\"mutated\":true,\"name\":\"";
+        head += JsonEscape(mod.moduleName);
+        head += "\",\"path\":\"";
+        head += JsonEscape(mod.filePath.string());
+        head += "\"";
+    } else {
+        head += "{\"name\":\"";
+        head += JsonEscape(mod.moduleName);
+        head += "\",\"path\":\"";
+        head += JsonEscape(mod.filePath.string());
+        head += "\"";
+    }
+    head += ",\"arch\":\"";
+    head += mod.arch;
+    head += "\"";
+    if (mod.imageBase) {
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "0x%llx",
+                      static_cast<unsigned long long>(mod.imageBase));
+        head += ",\"imageBase\":\"";
+        head += buf;
+        head += "\"";
+    }
+    head += ",\"gadgets\":[";
+    for (size_t i = 0; i < mod.gadgets.size(); ++i) {
+        const auto& g = mod.gadgets[i];
+        if (i)
+            head += ',';
+        head += "{\"address\":";
+        head += std::to_string(g.address);
+        head += ",\"disassembly\":\"";
+        head += JsonEscape(g.disassembly);
+        head += "\",\"bytes\":\"";
+        head += util::BytesToHex(g.bytes.data(), g.bytes.size());
+        head += "\",\"count\":";
+        head += std::to_string(g.numOccurrences);
+        head += "}";
+    }
+    head += "]}";
+    return head;
+}
+
+std::string FormatCsvHead(const ModuleGadgets& mod, bool mutated) {
+    std::string head;
+    head.reserve(mod.gadgets.size() * 96 + 32);
+
+    const bool is64 = mod.arch != kArchX86 && mod.arch != kArchArm;
+    const std::string moduleName = CsvEscape(mod.moduleName);
+    const std::string mutFlag = mutated ? "yes" : "no";
+    for (const auto& g : mod.gadgets) {
+        head += moduleName;
+        head += ',';
+        head += mutFlag;
+        head += ',';
+        AppendAddress(head, g.address, is64);
+        head += ',';
+        head += CsvEscape(g.disassembly);
+        head += ',';
+        head += CsvEscape(util::BytesToHex(g.bytes.data(), g.bytes.size()));
+        head += ',';
+        head += std::to_string(g.numOccurrences);
+        head += '\n';
+    }
+    return head;
+}
+
 // ---------------------------------------------------------------------------
 // Text sink (rp++-style), merged or per-module
 // ---------------------------------------------------------------------------
 
 class TextSink final : public IGadgetSink {
 public:
-    TextSink(std::ofstream out) : out_(std::move(out)) {
-        out_ << "; Total Gadgets v2 output\n";
+    explicit TextSink(const std::filesystem::path& path)
+        : ioBuf_(kIoBufferSize) {
+        if (!OpenInto(out_, path, ioBuf_.data(), ioBuf_.size()))
+            failed_ = true;
+        else
+            out_ << "; Total Gadgets v2 output\n";
     }
+    bool Failed() const { return failed_; }
 
     std::string WriteModule(const ModuleGadgets& mod, bool mutated) override {
+        // Format without holding the lock, then write in one call.
+        const std::string block = FormatTextHead(mod, mutated);
+
         std::lock_guard<std::mutex> lock(mu_);
-
-        const std::string prefix =
-            mutated ? "[" + mod.moduleName + ":mutated]" : "[" + mod.moduleName + "]";
-        const bool is64 = mod.arch != kArchX86 && mod.arch != kArchArm;
-
-        out_ << "; --- " << prefix << " (" << mod.gadgets.size() << " gadgets) ---\n";
-        for (const auto& g : mod.gadgets) {
-            out_ << prefix << " " << util::FormatAddress(g.address, is64) << ": "
-                 << g.disassembly << " (" << g.numOccurrences << " found)\n";
-        }
-        out_ << "\n";
-
+        out_.write(block.data(), static_cast<std::streamsize>(block.size()));
         if (!out_.good())
             return "write error (disk full or path invalid)";
         ++modulesWritten_;
@@ -116,7 +244,9 @@ public:
 
 private:
     std::mutex mu_;
+    std::vector<char> ioBuf_;   // declared before out_: destroyed after it
     std::ofstream out_;
+    bool failed_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -125,37 +255,20 @@ private:
 
 class JsonSink final : public IGadgetSink {
 public:
-    JsonSink(std::ofstream out) : out_(std::move(out)) {
-        out_ << "{\"generator\":\"Total Gadgets v2\",\"modules\":[";
+    explicit JsonSink(const std::filesystem::path& path)
+        : ioBuf_(kIoBufferSize) {
+        if (!OpenInto(out_, path, ioBuf_.data(), ioBuf_.size()))
+            failed_ = true;
+        else
+            out_ << "{\"generator\":\"Total Gadgets v2\",\"modules\":[";
     }
+    bool Failed() const { return failed_; }
 
     std::string WriteModule(const ModuleGadgets& mod, bool mutated) override {
+        const std::string block = FormatJsonHead(mod, mutated);
+
         std::lock_guard<std::mutex> lock(mu_);
-
-        if (modulesWritten_ > 0)
-            out_ << ",";
-        if (mutated)
-            out_ << "{\"mutated\":true,\"name\":\"" << JsonEscape(mod.moduleName)
-                 << "\",\"path\":\"" << JsonEscape(mod.filePath.string()) << "\"";
-        else
-            out_ << "{\"name\":\"" << JsonEscape(mod.moduleName) << "\",\"path\":\""
-                 << JsonEscape(mod.filePath.string()) << "\"";
-        out_ << ",\"arch\":\"" << mod.arch << "\"";
-        if (mod.imageBase)
-            out_ << ",\"imageBase\":\"0x" << std::hex << mod.imageBase << std::dec
-                 << "\"";
-        out_ << ",\"gadgets\":[";
-        for (size_t i = 0; i < mod.gadgets.size(); ++i) {
-            const auto& g = mod.gadgets[i];
-            if (i)
-                out_ << ",";
-            out_ << "{\"address\":" << g.address << ",\"disassembly\":\""
-                 << JsonEscape(g.disassembly) << "\",\"bytes\":\""
-                 << util::BytesToHex(g.bytes.data(), g.bytes.size())
-                 << "\",\"count\":" << g.numOccurrences << "}";
-        }
-        out_ << "]}";
-
+        out_.write(block.data(), static_cast<std::streamsize>(block.size()));
         if (!out_.good())
             return "write error (disk full or path invalid)";
         ++modulesWritten_;
@@ -178,7 +291,9 @@ public:
 
 private:
     std::mutex mu_;
+    std::vector<char> ioBuf_;   // declared before out_: destroyed after it
     std::ofstream out_;
+    bool failed_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -187,22 +302,20 @@ private:
 
 class CsvSink final : public IGadgetSink {
 public:
-    CsvSink(std::ofstream out) : out_(std::move(out)) {
-        out_ << "module,mutated,address,disassembly,bytes,count\n";
+    explicit CsvSink(const std::filesystem::path& path)
+        : ioBuf_(kIoBufferSize) {
+        if (!OpenInto(out_, path, ioBuf_.data(), ioBuf_.size()))
+            failed_ = true;
+        else
+            out_ << "module,mutated,address,disassembly,bytes,count\n";
     }
+    bool Failed() const { return failed_; }
 
     std::string WriteModule(const ModuleGadgets& mod, bool mutated) override {
+        const std::string block = FormatCsvHead(mod, mutated);
+
         std::lock_guard<std::mutex> lock(mu_);
-
-        const bool is64 = mod.arch != kArchX86 && mod.arch != kArchArm;
-        for (const auto& g : mod.gadgets) {
-            out_ << CsvEscape(mod.moduleName) << ',' << (mutated ? "yes" : "no")
-                 << ',' << util::FormatAddress(g.address, is64) << ','
-                 << CsvEscape(g.disassembly) << ','
-                 << CsvEscape(util::BytesToHex(g.bytes.data(), g.bytes.size())) << ','
-                 << g.numOccurrences << '\n';
-        }
-
+        out_.write(block.data(), static_cast<std::streamsize>(block.size()));
         if (!out_.good())
             return "write error (disk full or path invalid)";
         ++modulesWritten_;
@@ -220,7 +333,9 @@ public:
 
 private:
     std::mutex mu_;
+    std::vector<char> ioBuf_;   // declared before out_: destroyed after it
     std::ofstream out_;
+    bool failed_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -241,34 +356,41 @@ public:
             file += stemSuffix_;
         file += ExtensionForFormat(format_);
 
-        std::ofstream out(file, std::ios::binary);
-        if (!out)
-            return "cannot create " + util::ToUtf8(file.wstring());
-
-        std::string err;
+        std::string head;
+        std::string tail;
         switch (format_) {
-        case OutputFormat::Text: {
-            TextSink sink(std::move(out));
-            err = sink.WriteModule(mod, mutated);
-            err = err.empty() ? sink.Finish(false, 0, 0) : err;
+        case OutputFormat::Text:
+            head = "; Total Gadgets v2 output\n" + FormatTextHead(mod, mutated);
+            tail = "; Total modules: 1\n; Total gadgets: " +
+                   std::to_string(mod.gadgets.size()) + "\n";
             break;
-        }
-        case OutputFormat::Json: {
-            JsonSink sink(std::move(out));
-            err = sink.WriteModule(mod, mutated);
-            err = err.empty() ? sink.Finish(false, 0, 0) : err;
+        case OutputFormat::Json:
+            head = "{\"generator\":\"Total Gadgets v2\",\"modules\":[" +
+                   FormatJsonHead(mod, mutated);
+            tail = "],\"totalModules\":1,\"totalGadgets\":" +
+                   std::to_string(mod.gadgets.size()) + "}\n";
             break;
-        }
-        case OutputFormat::Csv: {
-            CsvSink sink(std::move(out));
-            err = sink.WriteModule(mod, mutated);
-            err = err.empty() ? sink.Finish(false, 0, 0) : err;
+        case OutputFormat::Csv:
+            head = "module,mutated,address,disassembly,bytes,count\n" +
+                   FormatCsvHead(mod, mutated);
             break;
-        }
         }
 
-        if (!err.empty())
-            return err;
+        // One shared buffer, one file at a time (we hold the lock).
+        std::ofstream out;
+        if (!OpenInto(out, file, ioBuf_.data(), ioBuf_.size())) {
+            out.clear();
+            out.open(file, std::ios::binary); // retry default-buffered
+            if (!out)
+                return "cannot create " + util::ToUtf8(file.wstring());
+        }
+        out.write(head.data(), static_cast<std::streamsize>(head.size()));
+        if (!tail.empty())
+            out.write(tail.data(), static_cast<std::streamsize>(tail.size()));
+        out.flush();
+        if (!out.good())
+            return "write error (disk full or path invalid)";
+
         ++modulesWritten_;
         gadgetsWritten_ += mod.gadgets.size();
         written_.push_back(std::move(file));
@@ -282,13 +404,9 @@ private:
     std::filesystem::path dir_;
     OutputFormat format_;
     std::wstring stemSuffix_;
+    std::vector<char> ioBuf_;
     std::vector<std::filesystem::path> written_;
 };
-
-std::ofstream OpenStream(const std::filesystem::path& path) {
-    std::ofstream out(path, std::ios::binary);
-    return out;
-}
 
 } // namespace
 
@@ -324,16 +442,31 @@ std::unique_ptr<IGadgetSink> CreateSink(const OutputOptions& opts, bool mutated,
         path.replace_filename(stem + L"_mutated" + ext);
     }
 
-    std::ofstream out = OpenStream(path);
-    if (!out) {
-        error = "cannot open output file: " + util::ToUtf8(path.wstring());
-        return nullptr;
-    }
-
     switch (opts.format) {
-    case OutputFormat::Text: return std::make_unique<TextSink>(std::move(out));
-    case OutputFormat::Json: return std::make_unique<JsonSink>(std::move(out));
-    case OutputFormat::Csv: return std::make_unique<CsvSink>(std::move(out));
+    case OutputFormat::Text: {
+        auto sink = std::make_unique<TextSink>(path);
+        if (sink->Failed()) {
+            error = "cannot open output file: " + util::ToUtf8(path.wstring());
+            return nullptr;
+        }
+        return sink;
+    }
+    case OutputFormat::Json: {
+        auto sink = std::make_unique<JsonSink>(path);
+        if (sink->Failed()) {
+            error = "cannot open output file: " + util::ToUtf8(path.wstring());
+            return nullptr;
+        }
+        return sink;
+    }
+    case OutputFormat::Csv: {
+        auto sink = std::make_unique<CsvSink>(path);
+        if (sink->Failed()) {
+            error = "cannot open output file: " + util::ToUtf8(path.wstring());
+            return nullptr;
+        }
+        return sink;
+    }
     }
 
     error = "unknown format";

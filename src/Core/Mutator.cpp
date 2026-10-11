@@ -162,7 +162,8 @@ struct Found {
     std::vector<uint8_t> bytes;
 };
 
-void MutateAroundAnchor(const Anchor& a, csh handle, const MutationOptions& opts,
+void MutateAroundAnchor(const Anchor& a, csh handle, cs_insn* insn,
+                        const MutationOptions& opts,
                         const std::vector<uint8_t>& badBytes,
                         std::vector<Found>& out) {
     const uint64_t termVa = a.sectionVa + a.offset;
@@ -173,43 +174,42 @@ void MutateAroundAnchor(const Anchor& a, csh handle, const MutationOptions& opts
         // Decode window: from start, enough bytes to reach past the anchor.
         size_t window = std::min(a.sectionSize - start, back + 16);
 
-        cs_insn* insns = nullptr;
-        const size_t count =
-            cs_disasm(handle, a.sectionData + start, window, a.sectionVa + start, 0, &insns);
-        if (count == 0)
-            continue;
+        // cs_disasm_iter with a caller-owned insn: no malloc/free per
+        // candidate and decoding stops at the first instruction the loop
+        // below rejects, instead of eagerly decoding the whole window like
+        // cs_disasm did (capstone documents up to 30% from this alone).
+        const uint8_t* code = a.sectionData + start;
+        uint64_t addr = a.sectionVa + start;
 
         std::string disasm;
         size_t totalBytes = 0;
         uint32_t insnCount = 0;
         bool valid = false;
 
-        for (size_t i = 0; i < count; ++i) {
-            const cs_insn& insn = insns[i];
-
-            if (insn.address > termVa)
+        while (cs_disasm_iter(handle, &code, &window, &addr, insn)) {
+            if (insn->address > termVa)
                 break; // overshot the anchor
 
-            if (insn.address == termVa) {
+            if (insn->address == termVa) {
                 // The anchor itself: it must be a valid ending and there must
                 // be at least one instruction before it (a lone terminator is
                 // the aligned gadget the main pass already reports).
-                valid = (insnCount >= 1) && IsGoodEnding(insn);
+                valid = (insnCount >= 1) && IsGoodEnding(*insn);
                 if (valid) {
                     disasm += " ; ";
-                    disasm += insn.mnemonic;
-                    if (insn.op_str[0] != '\0') {
+                    disasm += insn->mnemonic;
+                    if (insn->op_str[0] != '\0') {
                         disasm += ' ';
-                        disasm += insn.op_str;
+                        disasm += insn->op_str;
                     }
-                    totalBytes += insn.size;
+                    totalBytes += insn->size;
                     ++insnCount;
                 }
                 break;
             }
 
             // Mid-gadget instruction.
-            if (!opts.allowBranches && IsBranchy(insn))
+            if (!opts.allowBranches && IsBranchy(*insn))
                 break;
             if (insnCount >= opts.maxGadgetLen) {
                 // no room left for the terminator
@@ -218,12 +218,12 @@ void MutateAroundAnchor(const Anchor& a, csh handle, const MutationOptions& opts
 
             if (insnCount > 0)
                 disasm += " ; ";
-            disasm += insn.mnemonic;
-            if (insn.op_str[0] != '\0') {
+            disasm += insn->mnemonic;
+            if (insn->op_str[0] != '\0') {
                 disasm += ' ';
-                disasm += insn.op_str;
+                disasm += insn->op_str;
             }
-            totalBytes += insn.size;
+            totalBytes += insn->size;
             ++insnCount;
         }
 
@@ -234,8 +234,6 @@ void MutateAroundAnchor(const Anchor& a, csh handle, const MutationOptions& opts
                            std::vector<uint8_t>(a.sectionData + start,
                                                 a.sectionData + start + totalBytes)});
         }
-
-        cs_free(insns, count);
     }
 }
 
@@ -266,6 +264,11 @@ MutateModule(const PeInfo& pe, const MutationOptions& opts,
         if (cs_open(CS_ARCH_X86, mode, &handle) != CS_ERR_OK)
             return;
         cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+        cs_insn* insn = cs_malloc(handle);
+        if (insn == nullptr) {
+            cs_close(&handle);
+            return;
+        }
 
         auto& out = perThread[tid];
         for (;;) {
@@ -274,9 +277,10 @@ MutateModule(const PeInfo& pe, const MutationOptions& opts,
             const size_t idx = next.fetch_add(1, std::memory_order_relaxed);
             if (idx >= anchors.size())
                 break;
-            MutateAroundAnchor(anchors[idx], handle, opts, badBytes, out);
+            MutateAroundAnchor(anchors[idx], handle, insn, opts, badBytes, out);
         }
 
+        cs_free(insn, 1);
         cs_close(&handle);
     };
 
@@ -292,11 +296,30 @@ MutateModule(const PeInfo& pe, const MutationOptions& opts,
             t.join();
     }
 
-    // Merge, dedup against the main pass and across threads.
+    // Merge per-thread batches deterministically: identical disassembly can
+    // occur at several addresses, and anchor-to-thread assignment varies run
+    // to run. Sorting all candidates by address before the string dedup
+    // makes the lowest address win every time (the previous merge kept
+    // whichever anchor happened to be processed first).
     std::vector<librp::GadgetResult> results;
-    std::unordered_set<std::string> seen;
-    for (auto& batch : perThread) {
-        for (auto& f : batch) {
+    {
+        std::vector<Found> all;
+        size_t total = 0;
+        for (const auto& batch : perThread)
+            total += batch.size();
+        all.reserve(total);
+        for (auto& batch : perThread)
+            for (auto& f : batch)
+                all.push_back(std::move(f));
+
+        std::sort(all.begin(), all.end(),
+                  [](const Found& a, const Found& b) {
+                      return a.address < b.address;
+                  });
+
+        std::unordered_set<std::string> seen;
+        seen.reserve(all.size() * 2);
+        for (auto& f : all) {
             if (existingDisasms.count(f.disasm) || !seen.insert(f.disasm).second)
                 continue;
             librp::GadgetResult r;
@@ -308,12 +331,7 @@ MutateModule(const PeInfo& pe, const MutationOptions& opts,
         }
     }
 
-    // Deterministic output order (by address).
-    std::sort(results.begin(), results.end(),
-              [](const librp::GadgetResult& a, const librp::GadgetResult& b) {
-                  return a.address < b.address;
-              });
-    return results;
+    return results; // already address-ordered
 }
 
 } // namespace gadgets
