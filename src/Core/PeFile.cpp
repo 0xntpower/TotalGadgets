@@ -13,8 +13,9 @@
 
 namespace gadgets {
 
-PeInfo ParsePeFile(const std::filesystem::path& path) {
+PeInfo ParsePeFile(const std::filesystem::path& path, bool headersOnly) {
     PeInfo info;
+    info.headersOnly = headersOnly;
 
     // std::ifstream has an MSVC wide-path overload via std::filesystem::path,
     // so Unicode paths work here.
@@ -24,19 +25,30 @@ PeInfo ParsePeFile(const std::filesystem::path& path) {
         return info;
     }
 
-    // Read the whole file once; PE files we handle comfortably fit memory and
-    // the mutation pass needs random access to section bytes anyway.
+    // Full parse: read the whole file once (the mutation pass needs random
+    // access to section bytes anyway). Header-only reads are bounded to the
+    // NT headers + section table (~4 KB) so the scan phase never pays for a
+    // full-file read just to learn the arch and image base.
     file.seekg(0, std::ios::end);
     const std::streamoff fileSize = file.tellg();
     if (fileSize < static_cast<std::streamoff>(sizeof(IMAGE_DOS_HEADER))) {
-        info.error = "file too small for DOS header";
+        info.error = "file too small";
         return info;
+    }
+    size_t bytesToRead = static_cast<size_t>(fileSize);
+    if (headersOnly) {
+        // e_lfanew bound + sig + file header + largest optional header
+        // (240) + a 96-entry section table covers every PE the tool will
+        // meet; the per-iteration bounds checks handle anything beyond.
+        constexpr size_t kHeaderCap = 0x100000 + 4 + 20 + 240 + 96 * 40;
+        bytesToRead = std::min(bytesToRead, kHeaderCap);
     }
     file.seekg(0, std::ios::beg);
 
-    std::vector<uint8_t> raw(static_cast<size_t>(fileSize));
-    file.read(reinterpret_cast<char*>(raw.data()), fileSize);
-    if (!file && file.gcount() != fileSize) {
+    std::vector<uint8_t> raw(bytesToRead);
+    file.read(reinterpret_cast<char*>(raw.data()),
+              static_cast<std::streamsize>(bytesToRead));
+    if (!file && static_cast<size_t>(file.gcount()) != bytesToRead) {
         info.error = "short read";
         return info;
     }
@@ -140,7 +152,7 @@ PeInfo ParsePeFile(const std::filesystem::path& path) {
         info.sections.push_back(std::move(es));
     }
 
-    if (info.sections.empty())
+    if (info.sections.empty() && !headersOnly)
         info.error = "no executable sections";
 
     return info;

@@ -59,6 +59,7 @@ void Settings::Load() {
     constexpr wchar_t kMutation[] = L"Mutation";
     constexpr wchar_t kOutput[] = L"Output";
     constexpr wchar_t kMru[] = L"MRU";
+    constexpr wchar_t kLayout[] = L"Layout";
 
     scan.maxGadgetLen = static_cast<uint32_t>(
         std::max(1, ReadInt(kScan, L"MaxLen", static_cast<int>(scan.maxGadgetLen))));
@@ -88,6 +89,15 @@ void Settings::Load() {
                                        : OutputMode::SingleFile;
     lastOutput = ReadStr(kOutput, L"LastOutput", L"");
 
+    winX = ReadInt(kLayout, L"WinX", -1);
+    winY = ReadInt(kLayout, L"WinY", -1);
+    winCx = ReadInt(kLayout, L"WinCx", 0);
+    winCy = ReadInt(kLayout, L"WinCy", 0);
+    winMaximized = ReadInt(kLayout, L"WinMax", 0) != 0;
+    openWhenDone = ReadInt(kLayout, L"OpenWhenDone", 0) != 0;
+    for (int i = 0; i < kColumnCount; ++i)
+        columnWidths[i] = ReadInt(kLayout, (L"Col" + std::to_wstring(i)).c_str(), -1);
+
     mruFolders.clear();
     const int count = ReadInt(kMru, L"Count", 0);
     for (int i = 0; i < count && i < static_cast<int>(kMaxMru); ++i)
@@ -99,6 +109,7 @@ void Settings::Save() const {
     constexpr wchar_t kMutation[] = L"Mutation";
     constexpr wchar_t kOutput[] = L"Output";
     constexpr wchar_t kMru[] = L"MRU";
+    constexpr wchar_t kLayout[] = L"Layout";
 
     WriteInt(kScan, L"MaxLen", static_cast<int>(scan.maxGadgetLen));
     WriteInt(kScan, L"Threads", static_cast<int>(scan.threads));
@@ -125,6 +136,15 @@ void Settings::Save() const {
                                             : L"text");
     WriteStr(kOutput, L"Mode", mode == OutputMode::PerModule ? L"split" : L"single");
     WriteStr(kOutput, L"LastOutput", lastOutput);
+
+    WriteInt(kLayout, L"WinX", winX);
+    WriteInt(kLayout, L"WinY", winY);
+    WriteInt(kLayout, L"WinCx", winCx);
+    WriteInt(kLayout, L"WinCy", winCy);
+    WriteInt(kLayout, L"WinMax", winMaximized ? 1 : 0);
+    WriteInt(kLayout, L"OpenWhenDone", openWhenDone ? 1 : 0);
+    for (int i = 0; i < kColumnCount; ++i)
+        WriteInt(kLayout, (L"Col" + std::to_wstring(i)).c_str(), columnWidths[i]);
 
     WriteInt(kMru, L"Count", static_cast<int>(mruFolders.size()));
     for (size_t i = 0; i < mruFolders.size(); ++i)

@@ -2,6 +2,8 @@
 
 #define IDD_MAINDLG                     100
 #define IDR_MAINFRAME                   128
+#define IDR_MAINMENU                    129
+#define IDR_ACCEL                       130
 
 #define IDC_FOLDER_COMBO                1000
 #define IDC_BROWSE_FOLDER               1001
@@ -22,14 +24,8 @@
 
 #define IDC_ENABLE_MUTATION             1030
 #define IDC_MAX_MUTATION_OFFSET         1031
-#define IDC_LBL_MAXOFFSET               1032
 
 #define IDC_SCAN                        1040
-
-#define IDC_STATUS                      1050
-#define IDC_ELAPSED                     1051
-#define IDC_ETA                         1052
-#define IDC_GADGET_COUNT                1053
 
 #define IDC_PROGRESS                    1060
 
@@ -40,8 +36,19 @@
 #define IDC_RESULTS_COUNT               1074
 #define IDC_LIST                        1075
 #define IDC_LOG                         1076
+#define IDC_STATUSBAR                   1077
+#define IDC_OPEN_WHEN_DONE              1078
 
+#define IDC_FILTER_LBL                  1079
 #define IDC_GRP_INPUT                   1080
 #define IDC_GRP_OUTPUT                  1081
 #define IDC_GRP_SEARCH                  1082
 #define IDC_GRP_MUTATION                1083
+// Menu commands
+#define ID_MRU_FOLDER0                  11100 // .. ID_MRU_FOLDER0+kMaxMru-1
+#define ID_VIEW_GADGETS                 11200
+#define ID_VIEW_LOG                     11201
+#define ID_EDIT_COPY_SEL                11210
+#define ID_EDIT_COPY_ALL                11211
+#define ID_TOOLS_OPEN_OUTPUT            11220
+#define ID_HELP_ABOUT                   11230

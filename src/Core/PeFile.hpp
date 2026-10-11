@@ -24,8 +24,15 @@ struct PeInfo {
 
     bool Ok() const { return error.empty(); }
     uint64_t RvaToVa(uint64_t rva) const { return imageBase + rva; }
+
+    // True when parsed with headersOnly (sections not loaded).
+    bool headersOnly = false;
 };
 
-PeInfo ParsePeFile(const std::filesystem::path& path);
+// Full parse: headers + executable section bytes (needed by the mutation
+// pass). HeadersOnly: arch + image base only, reads a few KB instead of the
+// whole file (used by the scan phase for metadata).
+PeInfo ParsePeFile(const std::filesystem::path& path,
+                   bool headersOnly = false);
 
 } // namespace gadgets

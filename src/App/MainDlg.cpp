@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <filesystem>
 
+#include <shellapi.h>
+
 #include "Core/Sink.hpp"
 #include "Core/Util.hpp"
 #include "Defaults.hpp"
@@ -10,16 +12,40 @@
 namespace gadgets {
 
 namespace {
-
 std::wstring GetDlgItemWText(HWND dlg, int id) {
-    int len = ::GetWindowTextLengthW(::GetDlgItem(dlg, id));
-    std::wstring text(static_cast<size_t>(len) + 1, L'\0');
-    int copied = ::GetDlgItemTextW(dlg, id, text.data(), len + 1);
-    text.resize(static_cast<size_t>(copied));
-    return text;
+    wchar_t buf[4096];
+    *buf = L'\0';
+    UINT copied = ::GetDlgItemTextW(dlg, id, buf, 4096);
+    return std::wstring(buf, copied);
 }
 
+int StricmpAscii(const std::string& a, const std::string& b) {
+    return ::CompareStringA(LOCALE_INVARIANT, 0, a.c_str(),
+                            static_cast<int>(a.size()), b.c_str(),
+                            static_cast<int>(b.size())) - CSTR_EQUAL;
+}
+
+// About box via the native task dialog (Vista+).
+class CAboutTaskDialog : public CTaskDialogImpl<CAboutTaskDialog> {
+public:
+    CAboutTaskDialog() {
+        SetWindowTitle(L"About Total Gadgets");
+        SetMainInstructionText(L"Total Gadgets v2");
+        SetContentText(
+            L"Bulk ROP gadget extraction for Windows binaries.\n\n"
+            L"Main pass: librp (rp++ engine, BeaEngine)\n"
+            L"Mutation pass: capstone second decoder\n\n"
+            L"MIT License. Results are provided for defensive research.");
+        SetMainIcon(TD_INFORMATION_ICON);
+        static TASKDIALOG_BUTTON buttons[] = {{IDOK, L"OK"}};
+        SetButtons(buttons, 1);
+        ModifyFlags(0, TDF_ALLOW_DIALOG_CANCELLATION);
+    }
+};
+
 } // namespace
+
+
 
 // ---------------------------------------------------------------------------
 // Init / teardown
@@ -35,13 +61,15 @@ BOOL MainDlg::OnInitDialog(CWindow /*wndFocus*/, LPARAM /*lInitParam*/) {
                                         ::GetSystemMetrics(SM_CYSMICON));
     SetIcon(hIconSmall, FALSE);
 
-    CenterWindow();
+    DlgResize_Init(false, true, 0); // no gripper control: the status bar has one
 
-    CRect rc;
-    GetWindowRect(&rc);
-    minSize_ = { rc.Width(), rc.Height() };
-
-    DlgResize_Init(true, true, 0);
+    // The designed size is the minimum track size; capture it before the
+    // saved placement is restored.
+    {
+        CRect rc;
+        GetWindowRect(&rc);
+        minSize_ = {rc.Width(), rc.Height()};
+    }
 
     // Controls
     progressBar_ = GetDlgItem(IDC_PROGRESS);
@@ -56,13 +84,13 @@ BOOL MainDlg::OnInitDialog(CWindow /*wndFocus*/, LPARAM /*lInitParam*/) {
     list_.AddColumn(L"Address", 2);
     list_.AddColumn(L"Disassembly", 3);
     list_.AddColumn(L"Bytes", 4);
-    list_.AddColumn(L"#", 5);
+    list_.AddColumn(L"Found", 5);
     list_.SetColumnWidth(0, 44);
     list_.SetColumnWidth(1, 110);
     list_.SetColumnWidth(2, 150);
     list_.SetColumnWidth(3, 380);
     list_.SetColumnWidth(4, 160);
-    list_.SetColumnWidth(5, 40);
+    list_.SetColumnWidth(5, 48);
 
     tab_ = GetDlgItem(IDC_TAB);
     tab_.InsertItem(0, L"Gadgets");
@@ -79,6 +107,9 @@ BOOL MainDlg::OnInitDialog(CWindow /*wndFocus*/, LPARAM /*lInitParam*/) {
     moduleCombo_.SetCurSel(0);
     moduleCombo_.EnableWindow(FALSE);
 
+    statusBar_ = GetDlgItem(IDC_STATUSBAR);
+    UpdateStatusParts(0);
+
     monoFont_.CreateFont(
         kMonoFontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -87,6 +118,8 @@ BOOL MainDlg::OnInitDialog(CWindow /*wndFocus*/, LPARAM /*lInitParam*/) {
     logCtrl.SetFont(monoFont_);
     CEdit filterCtrl(GetDlgItem(IDC_FILTER));
     filterCtrl.SetFont(monoFont_);
+    ::SendMessageW(filterCtrl, EM_SETCUEBANNER, FALSE,
+                   reinterpret_cast<LPARAM>(L"Search disassembly, module, or address"));
 
     // Defaults
     SetDlgItemInt(IDC_MAX_GADGET_LEN, 5, FALSE);
@@ -95,20 +128,65 @@ BOOL MainDlg::OnInitDialog(CWindow /*wndFocus*/, LPARAM /*lInitParam*/) {
 
     settings_.Load();
     LoadSettingsToUi();
+    LoadColumnWidths();
+    ApplySavedPlacement();
 
     SetTab(0);
     UpdateMutationState();
 
-    SetDlgItemTextA(m_hWnd, IDC_ELAPSED, "");
-    SetDlgItemTextA(m_hWnd, IDC_ETA, "");
-    SetDlgItemTextA(m_hWnd, IDC_GADGET_COUNT, "");
+    SetPane(kPaneStatus, L"Ready");
+    SetTitle(nullptr);
 
     return TRUE;
 }
+
 void MainDlg::OnDestroy() {
     KillTimer(kUiTimerId);
+    KillTimer(kFilterDebounceId);
     if (worker_.joinable())
         worker_.join();
+    SaveLayout();
+    ::PostQuitMessage(0);
+}
+
+void MainDlg::SaveLayout() {
+    WINDOWPLACEMENT wp = {};
+    wp.length = sizeof(WINDOWPLACEMENT);
+    if (GetWindowPlacement(&wp)) {
+        const RECT& r = wp.rcNormalPosition;
+        settings_.winX = r.left;
+        settings_.winY = r.top;
+        settings_.winCx = r.right - r.left;
+        settings_.winCy = r.bottom - r.top;
+        settings_.winMaximized = (wp.showCmd == SW_SHOWMAXIMIZED);
+    }
+    for (int i = 0; i < Settings::kColumnCount; ++i)
+        settings_.columnWidths[i] = list_.GetColumnWidth(i);
+    settings_.Save();
+}
+
+void MainDlg::ApplySavedPlacement() {
+    CRect target(settings_.winX, settings_.winY,
+                 settings_.winX + settings_.winCx,
+                 settings_.winY + settings_.winCy);
+    const bool valid = settings_.winX >= 0 && settings_.winCx > 0 &&
+                       ::MonitorFromRect(target, MONITOR_DEFAULTTONULL) !=
+                           nullptr;
+    if (!valid) {
+        CenterWindow();
+        return;
+    }
+    SetWindowPos(nullptr, settings_.winX, settings_.winY,
+                 settings_.winCx, settings_.winCy,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    if (settings_.winMaximized)
+        ShowWindow(SW_MAXIMIZE);
+}
+
+void MainDlg::LoadColumnWidths() {
+    for (int i = 0; i < Settings::kColumnCount; ++i)
+        if (settings_.columnWidths[i] > 0)
+            list_.SetColumnWidth(i, settings_.columnWidths[i]);
 }
 
 void MainDlg::LoadSettingsToUi() {
@@ -129,6 +207,8 @@ void MainDlg::LoadSettingsToUi() {
                    settings_.mutation.enabled ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(IDC_MUTATE_BRANCHES,
                    settings_.mutation.allowBranches ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(IDC_OPEN_WHEN_DONE,
+                   settings_.openWhenDone ? BST_CHECKED : BST_UNCHECKED);
     SetDlgItemInt(IDC_MAX_GADGET_LEN, settings_.scan.maxGadgetLen, FALSE);
     if (settings_.scan.threads > 0)
         SetDlgItemInt(IDC_MAX_THREADS, settings_.scan.threads, FALSE);
@@ -172,6 +252,9 @@ void MainDlg::SaveSettingsFromUi() {
     settings_.mutation.lookback = std::max<UINT>(
         1, GetDlgItemInt(IDC_MAX_MUTATION_OFFSET, nullptr, FALSE));
 
+    settings_.openWhenDone =
+        IsDlgButtonChecked(IDC_OPEN_WHEN_DONE) == BST_CHECKED;
+
     settings_.format = static_cast<OutputFormat>(formatCombo_.GetCurSel());
     settings_.mode = (IsDlgButtonChecked(IDC_SPLIT) == BST_CHECKED)
                          ? OutputMode::PerModule
@@ -192,7 +275,39 @@ void MainDlg::OnGetMinMaxInfo(LPMINMAXINFO mmi) {
     }
 }
 
+void MainDlg::OnSize(UINT nType, CSize size) {
+    SetMsgHandled(FALSE); // CDialogResize lays out controls first
+    if (statusBar_.m_hWnd != nullptr)
+        UpdateStatusParts(size.cx);
+}
+
+void MainDlg::UpdateStatusParts(int cx) {
+    if (cx <= 0) {
+        CRect rc;
+        statusBar_.GetClientRect(&rc);
+        cx = rc.Width();
+    }
+    const int kPane1 = 170; // counts
+    const int kPane2 = 86;  // elapsed
+    const int kPane3 = 104; // ETA
+    int edges[3];
+    edges[0] = std::max(cx - kPane1 - kPane2 - kPane3, 80);
+    edges[1] = std::max(cx - kPane2 - kPane3, edges[0] + 40);
+    edges[2] = std::max(cx - kPane3, edges[1] + 40);
+    statusBar_.SetParts(3, edges);
+}
+
+void MainDlg::SetPane(int pane, const wchar_t* text) {
+    statusBar_.SendMessage(SB_SETTEXTW, MAKEWPARAM(pane, 0),
+                          reinterpret_cast<LPARAM>(text));
+}
+
 void MainDlg::OnTimer(UINT_PTR timerId) {
+    if (timerId == kFilterDebounceId) {
+        KillTimer(kFilterDebounceId);
+        ApplyFilter();
+        return;
+    }
     if (timerId != kUiTimerId || !scanning_.load())
         return;
     UpdateUiFromSnapshot();
@@ -204,6 +319,16 @@ void MainDlg::UpdateUiFromSnapshot() {
         return;
 
     const auto snap = engine_->Snapshot();
+
+    // Phase transitions: marquee while enumerating, smooth bar otherwise.
+    if (snap.phase == Phase::Enumerating && !marqueeOn_) {
+        marqueeOn_ = true;
+        ::SendMessageW(progressBar_, PBM_SETMARQUEE, TRUE, 30);
+    } else if (snap.phase != Phase::Enumerating && marqueeOn_) {
+        marqueeOn_ = false;
+        ::SendMessageW(progressBar_, PBM_SETMARQUEE, FALSE, 0);
+        progressBar_.SetRange(0, 100);
+    }
 
     int pct = 0;
     switch (snap.phase) {
@@ -218,11 +343,12 @@ void MainDlg::UpdateUiFromSnapshot() {
     default:
         break;
     }
-    progressBar_.SetPos(pct);
+    if (!marqueeOn_)
+        progressBar_.SetPos(pct);
 
     std::wstring status;
     switch (snap.phase) {
-    case Phase::Enumerating: status = L"Enumerating..."; break;
+    case Phase::Enumerating: status = L"Enumerating files..."; break;
     case Phase::Scanning:
         status = L"Scanning: " + snap.currentFile;
         break;
@@ -234,13 +360,13 @@ void MainDlg::UpdateUiFromSnapshot() {
     if (stop_.Stopped())
         status = L"Cancelling... " + status;
     if (!status.empty())
-        ::SetDlgItemTextW(m_hWnd, IDC_STATUS, status.c_str());
+        SetPane(kPaneStatus, status.c_str());
 
     const auto elapsed = std::chrono::duration<double>(
                              std::chrono::steady_clock::now() - scanStart_)
                              .count();
-    SetDlgItemTextA(m_hWnd, IDC_ELAPSED,
-                    util::FormatElapsed(elapsed).c_str());
+    SetPane(kPaneElapsed,
+            util::ToWide(util::FormatElapsed(elapsed)).c_str());
 
     std::wstring eta = L"--";
     if (snap.phase == Phase::Scanning && snap.bytesDone > 0 && elapsed > 0.5) {
@@ -252,14 +378,26 @@ void MainDlg::UpdateUiFromSnapshot() {
             eta = L"soon";
         }
     }
-    ::SetDlgItemTextW(m_hWnd, IDC_ETA, (L"ETA " + eta).c_str());
+    SetPane(kPaneEta, (L"ETA " + eta).c_str());
 
-    wchar_t count[96];
-    swprintf_s(count, L"%zu gadgets%s", snap.gadgetsFound,
-               snap.mutatedFound > 0
-                   ? (L" +" + std::to_wstring(snap.mutatedFound) + L" mut").c_str()
-                   : L"");
-    ::SetDlgItemTextW(m_hWnd, IDC_GADGET_COUNT, count);
+    std::wstring counts = util::ToWide(util::FormatCount(snap.gadgetsFound));
+    if (snap.mutatedFound > 0)
+        counts += L" +" + util::ToWide(util::FormatCount(snap.mutatedFound)) +
+                  L" mut";
+    SetPane(kPaneCounts, counts.c_str());
+
+    // Title mirrors progress, Explorer-style, so minimized scans are visible.
+    if (snap.phase == Phase::Scanning || snap.phase == Phase::Mutating) {
+        wchar_t title[64];
+        swprintf_s(title, L"Total Gadgets v2 - %s %d%%",
+                   snap.phase == Phase::Scanning ? L"Scanning" : L"Mutating",
+                   pct);
+        SetWindowTextW(title);
+    }
+}
+
+void MainDlg::SetTitle(const wchar_t* text) {
+    SetWindowTextW(text ? text : L"Total Gadgets v2");
 }
 
 void MainDlg::DrainLog() {
@@ -413,26 +551,29 @@ void MainDlg::StartScan() {
 
     // Reset UI
     ::SetDlgItemTextW(m_hWnd, IDC_LOG, L"");
-    ::SetDlgItemTextW(m_hWnd, IDC_STATUS, L"Starting...");
-    SetDlgItemTextA(m_hWnd, IDC_ELAPSED, "");
-    SetDlgItemTextA(m_hWnd, IDC_ETA, "");
-    SetDlgItemTextA(m_hWnd, IDC_GADGET_COUNT, "");
     progressBar_.SetPos(0);
     rows_.clear();
     filtered_.clear();
+    sortCol_ = -1;
+    UpdateSortIndicators();
     list_.SetItemCount(0);
     moduleCombo_.ResetContent();
     moduleCombo_.AddString(L"All modules");
     moduleCombo_.SetCurSel(0);
     moduleCombo_.EnableWindow(FALSE);
-    SetDlgItemTextA(m_hWnd, IDC_RESULTS_COUNT, "");
+    ::SetDlgItemTextW(m_hWnd, IDC_RESULTS_COUNT, L"");
 
     scanning_.store(true);
     stop_.Reset();
     scanStart_ = std::chrono::steady_clock::now();
+    marqueeOn_ = true; // the enumeration phase shows first
+    ::SendMessageW(progressBar_, PBM_SETMARQUEE, TRUE, 30);
 
     ::SetDlgItemTextW(m_hWnd, IDC_SCAN, L"Cancel");
     ::EnableWindow(GetDlgItem(IDC_ENABLE_MUTATION), FALSE);
+    SetPane(kPaneStatus, L"Starting...");
+    SetPane(kPaneEta, L"");
+    SetTitle(nullptr);
 
     engine_ = std::make_unique<Engine>(config, stop_, RunCallbacks{});
     {
@@ -467,6 +608,8 @@ void MainDlg::CancelScan() {
     ::EnableWindow(GetDlgItem(IDC_SCAN), FALSE);
 }
 
+
+
 LRESULT MainDlg::OnScanDone(UINT, WPARAM wParam, LPARAM) {
     std::unique_ptr<ScanStats> stats(reinterpret_cast<ScanStats*>(wParam));
 
@@ -478,31 +621,41 @@ LRESULT MainDlg::OnScanDone(UINT, WPARAM wParam, LPARAM) {
     DrainLog();
 
     scanning_.store(false);
+    marqueeOn_ = false;
+    ::SendMessageW(progressBar_, PBM_SETMARQUEE, FALSE, 0);
+    progressBar_.SetRange(0, 100);
     progressBar_.SetPos(stats->cancelled ? progressBar_.GetPos() : 100);
 
     ::SetDlgItemTextW(m_hWnd, IDC_SCAN, L"Scan");
     ::EnableWindow(GetDlgItem(IDC_SCAN), TRUE);
     ::EnableWindow(GetDlgItem(IDC_ENABLE_MUTATION), TRUE);
 
-    wchar_t status[128];
+    wchar_t status[160];
     if (stats->cancelled) {
-        swprintf_s(status, L"Cancelled - %u module(s) scanned",
-                   stats->filesScanned);
+        swprintf_s(status, L"Cancelled - %s module(s) scanned",
+                   util::ToWide(util::FormatCount(stats->filesScanned)).c_str());
     } else if (stats->filesFailed > 0 || !stats->outputWritten) {
-        swprintf_s(status, L"Finished with errors (%u failed)",
-                   stats->filesFailed);
+        swprintf_s(status, L"Finished with errors (%s failed)",
+                   util::ToWide(util::FormatCount(stats->filesFailed)).c_str());
     } else {
-        swprintf_s(status, L"Done - %u module(s), %zu gadgets",
-                   stats->filesScanned, stats->gadgetsFound);
+        swprintf_s(status, L"Done - %s module(s), %s gadgets",
+                   util::ToWide(util::FormatCount(stats->filesScanned)).c_str(),
+                   util::ToWide(util::FormatCount(stats->gadgetsFound)).c_str());
     }
-    ::SetDlgItemTextW(m_hWnd, IDC_STATUS, status);
-    SetDlgItemTextA(m_hWnd, IDC_ETA, "");
+    SetPane(kPaneStatus, status);
+    SetPane(kPaneEta, L"");
+
+    SetTitle(stats->cancelled ? L"Total Gadgets v2 - cancelled"
+                              : L"Total Gadgets v2 - done");
 
     BuildRows();
     ApplyFilter();
     moduleCombo_.EnableWindow(moduleCombo_.GetCount() > 1);
 
     ::MessageBeep(stats->cancelled ? MB_ICONEXCLAMATION : MB_ICONASTERISK);
+
+    if (settings_.openWhenDone && !stats->cancelled && stats->outputWritten)
+        OpenOutputInExplorer();
     return 0;
 }
 
@@ -512,7 +665,7 @@ void MainDlg::OnCancel(UINT, int nID, CWindow) {
         return;
     }
     SaveSettingsFromUi();
-    EndDialog(nID);
+    DestroyWindow();
 }
 
 // ---------------------------------------------------------------------------
@@ -588,15 +741,26 @@ void MainDlg::ApplyFilter() {
         if (match(row))
             filtered_.push_back(row);
 
+    if (sortCol_ >= 0)
+        SortFiltered();
+
     list_.SetItemCount(static_cast<int>(filtered_.size()));
 
     wchar_t count[96];
-    swprintf_s(count, L"%zu / %zu rows", filtered_.size(), rows_.size());
+    swprintf_s(count, L"%s / %s rows",
+               util::ToWide(util::FormatCount(filtered_.size())).c_str(),
+               util::ToWide(util::FormatCount(rows_.size())).c_str());
     ::SetDlgItemTextW(m_hWnd, IDC_RESULTS_COUNT, count);
 }
 
 LRESULT MainDlg::OnFilterChanged(WORD, WORD, HWND) {
-    ApplyFilter();
+    // Debounce: filtering over a million rows should not re-run per
+    // keystroke. Small result sets apply immediately.
+    KillTimer(kFilterDebounceId);
+    if (rows_.size() < 20000)
+        ApplyFilter();
+    else
+        SetTimer(kFilterDebounceId, kFilterDebounceMs);
     return 0;
 }
 
@@ -604,6 +768,103 @@ LRESULT MainDlg::OnModuleFilterChanged(WORD, WORD, HWND) {
     ApplyFilter();
     return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Sorting
+// ---------------------------------------------------------------------------
+
+const ModuleGadgets& MainDlg::RowModule(const Row& row) const {
+    const auto& mods =
+        row.mutated ? engine_->MutatedResults() : engine_->Results();
+    return mods[row.module];
+}
+
+bool MainDlg::RowLess(const Row& a, const Row& b) const {
+    const ModuleGadgets& ma = RowModule(a);
+    const ModuleGadgets& mb = RowModule(b);
+    const auto& ga = ma.gadgets[a.gadget];
+    const auto& gb = mb.gadgets[b.gadget];
+
+    int cmp = 0;
+    switch (sortCol_) {
+    case 0:
+        cmp = static_cast<int>(a.mutated) - static_cast<int>(b.mutated);
+        break;
+    case 1:
+        cmp = StricmpAscii(ma.moduleName, mb.moduleName);
+        break;
+    case 2:
+        cmp = ga.address < gb.address ? -1 : ga.address > gb.address ? 1 : 0;
+        break;
+    case 3:
+        cmp = StricmpAscii(ga.disassembly, gb.disassembly);
+        break;
+    case 4:
+        cmp = StricmpAscii(util::BytesToHex(ga.bytes.data(), ga.bytes.size()),
+                           util::BytesToHex(gb.bytes.data(), gb.bytes.size()));
+        break;
+    case 5:
+        cmp = ga.numOccurrences < gb.numOccurrences
+                  ? -1
+                  : ga.numOccurrences > gb.numOccurrences ? 1 : 0;
+        break;
+    default:
+        return false;
+    }
+    if (!sortAsc_)
+        cmp = -cmp;
+    if (cmp != 0)
+        return cmp < 0;
+    // Stable total order: mutated, then module, then underlying index.
+    if (a.mutated != b.mutated)
+        return !a.mutated;
+    if (a.module != b.module)
+        return a.module < b.module;
+    return a.gadget < b.gadget;
+}
+
+void MainDlg::SortFiltered() {
+    if (sortCol_ < 0 || !engine_ || filtered_.empty())
+        return;
+    const HCURSOR prev = ::SetCursor(::LoadCursor(nullptr, IDC_WAIT));
+    std::stable_sort(filtered_.begin(), filtered_.end(),
+                     [this](const Row& a, const Row& b) { return RowLess(a, b); });
+    ::SetCursor(prev);
+}
+
+void MainDlg::UpdateSortIndicators() {
+    CHeaderCtrl header = list_.GetHeader();
+    if (!header)
+        return;
+    for (int i = 0; i < Settings::kColumnCount; ++i) {
+        HDITEM hdi = {};
+        hdi.mask = HDI_FORMAT;
+        header.GetItem(i, &hdi);
+        hdi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == sortCol_)
+            hdi.fmt |= sortAsc_ ? HDF_SORTUP : HDF_SORTDOWN;
+        header.SetItem(i, &hdi);
+    }
+}
+
+LRESULT MainDlg::OnColumnClick(NMHDR* pnmh) {
+    auto* lv = reinterpret_cast<NMLISTVIEW*>(pnmh);
+    const int col = lv->iSubItem;
+    if (sortCol_ == col)
+        sortAsc_ = !sortAsc_;
+    else {
+        sortCol_ = col;
+        sortAsc_ = true;
+    }
+    SortFiltered();
+    UpdateSortIndicators();
+    list_.SetItemCount(static_cast<int>(filtered_.size()));
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Data provider / clipboard
+// ---------------------------------------------------------------------------
 
 LRESULT MainDlg::OnGetDispInfo(NMHDR* pnmh) {
     auto* pdi = reinterpret_cast<NMLVDISPINFO*>(pnmh);
@@ -669,25 +930,9 @@ std::wstring MainDlg::RowText(size_t filteredIndex) const {
            std::to_wstring(g.numOccurrences) + L" found)";
 }
 
-void MainDlg::CopyToClipboard(bool selectedOnly) {
-    if (filtered_.empty() || !::OpenClipboard(m_hWnd))
+void MainDlg::CopyTextToClipboard(const std::wstring& text) {
+    if (!::OpenClipboard(m_hWnd))
         return;
-
-    std::wstring text;
-    if (selectedOnly && list_.GetSelectedCount() > 0) {
-        int item = list_.GetNextItem(-1, LVNI_SELECTED);
-        while (item >= 0) {
-            text += RowText(static_cast<size_t>(item));
-            text += L"\r\n";
-            item = list_.GetNextItem(item, LVNI_SELECTED);
-        }
-    } else {
-        for (size_t i = 0; i < filtered_.size(); ++i) {
-            text += RowText(i);
-            text += L"\r\n";
-        }
-    }
-
     const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     HGLOBAL h = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
     if (h) {
@@ -697,24 +942,189 @@ void MainDlg::CopyToClipboard(bool selectedOnly) {
         ::SetClipboardData(CF_UNICODETEXT, h);
     }
     ::CloseClipboard();
+}
 
-    AppendLog("Copied " + std::to_string(
-        selectedOnly && list_.GetSelectedCount() > 0
-            ? static_cast<size_t>(list_.GetSelectedCount())
-            : filtered_.size()) + " row(s) to clipboard.");
+void MainDlg::CopyToClipboard(bool selectedOnly) {
+    if (filtered_.empty())
+        return;
+
+    std::wstring text;
+    size_t copied = 0;
+    if (selectedOnly && list_.GetSelectedCount() > 0) {
+        int item = list_.GetNextItem(-1, LVNI_SELECTED);
+        while (item >= 0) {
+            text += RowText(static_cast<size_t>(item));
+            text += L"\r\n";
+            ++copied;
+            item = list_.GetNextItem(item, LVNI_SELECTED);
+        }
+    } else {
+        for (size_t i = 0; i < filtered_.size(); ++i) {
+            text += RowText(i);
+            text += L"\r\n";
+        }
+        copied = filtered_.size();
+    }
+    CopyTextToClipboard(text);
+    AppendLog("Copied " + std::to_string(copied) + " row(s) to clipboard.");
 }
 
 void MainDlg::OnCopy(UINT, int, CWindow) {
     CopyToClipboard(true);
 }
 
-LRESULT MainDlg::OnListKeyDown(NMHDR* pnmh) {
-    auto* lv = reinterpret_cast<NMLVKEYDOWN*>(pnmh);
-    if (lv->wVKey == 'C' && (::GetKeyState(VK_CONTROL) & 0x8000)) {
-        CopyToClipboard(true);
-        return 1;
+// Ctrl+C: if the log edit has focus, let it copy its own selection;
+// otherwise copy the selected gadget rows.
+void MainDlg::CopyFocusedControl() {
+    const HWND focus = ::GetFocus();
+    if (focus != nullptr && focus == GetDlgItem(IDC_LOG)) {
+        ::SendMessageW(focus, WM_COPY, 0, 0);
+        return;
+    }
+    CopyToClipboard(true);
+}
+
+LRESULT MainDlg::OnListDoubleClick(NMHDR* pnmh) {
+    auto* nm = reinterpret_cast<NMITEMACTIVATE*>(pnmh);
+    if (nm->iItem >= 0 && static_cast<size_t>(nm->iItem) < filtered_.size()) {
+        const std::wstring text = RowText(static_cast<size_t>(nm->iItem));
+        CopyTextToClipboard(text);
+        AppendLog("Copied: " + util::ToUtf8(text));
     }
     return 0;
+}
+
+LRESULT MainDlg::OnListRightClick(NMHDR*) {
+    CMenu menu;
+    menu.CreatePopupMenu();
+    menu.AppendMenu(MF_STRING | (list_.GetSelectedCount() > 0 ? 0 : MF_GRAYED),
+                    ID_EDIT_COPY_SEL, L"&Copy Selected\tCtrl+C");
+    menu.AppendMenu(MF_STRING, ID_EDIT_COPY_ALL, L"Copy &All Filtered Rows");
+    menu.AppendMenu(MF_SEPARATOR);
+    menu.AppendMenu(MF_STRING, ID_TOOLS_OPEN_OUTPUT, L"&Open Output Folder");
+    menu.SetMenuDefaultItem(ID_EDIT_COPY_SEL, FALSE);
+
+    CPoint pt;
+    ::GetCursorPos(&pt);
+    const int cmd = menu.TrackPopupMenu(
+        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, m_hWnd);
+    switch (cmd) {
+    case ID_EDIT_COPY_SEL: CopyFocusedControl(); break;
+    case ID_EDIT_COPY_ALL: CopyToClipboard(false); break;
+    case ID_TOOLS_OPEN_OUTPUT: OpenOutputInExplorer(); break;
+    default: break;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Menus / commands
+// ---------------------------------------------------------------------------
+
+void MainDlg::OnInitMenuPopup(CMenuHandle menu, UINT uPos, BOOL bSysMenu) {
+    if (bSysMenu || menu.m_hMenu == nullptr)
+        return;
+
+    // Identify menus by handle: WM_INITMENUPOPUP also arrives for submenus
+    // with positions relative to their parent.
+    CMenu main = GetMenu();
+    CMenuHandle file = main.GetSubMenu(0);
+    CMenuHandle edit = main.GetSubMenu(1);
+    CMenuHandle view = main.GetSubMenu(2);
+
+    if (file.m_hMenu != nullptr && menu.m_hMenu == file.m_hMenu) {
+        // Rebuild the Recent Folders submenu (item index 2 in File).
+        CMenuHandle recent = file.GetSubMenu(2);
+        if (recent.m_hMenu == nullptr)
+            return;
+        while (recent.GetMenuItemCount() > 0)
+            recent.RemoveMenu(0, MF_BYPOSITION);
+        if (settings_.mruFolders.empty()) {
+            recent.AppendMenu(MF_STRING | MF_GRAYED, ID_MRU_FOLDER0,
+                              L"(no recent folders)");
+        } else {
+            wchar_t label[MAX_PATH * 2 + 8];
+            for (size_t i = 0; i < settings_.mruFolders.size() &&
+                               i < Settings::kMaxMru; ++i) {
+                swprintf_s(label, L"&%zu  %s", i + 1,
+                           settings_.mruFolders[i].c_str());
+                recent.AppendMenu(MF_STRING,
+                                  ID_MRU_FOLDER0 + static_cast<UINT>(i),
+                                  label);
+            }
+        }
+        return;
+    }
+
+    if (edit.m_hMenu != nullptr && menu.m_hMenu == edit.m_hMenu) {
+        menu.EnableMenuItem(ID_EDIT_COPY_SEL,
+                            MF_BYCOMMAND |
+                                (list_.GetSelectedCount() > 0 ? 0 : MF_GRAYED));
+        menu.EnableMenuItem(ID_EDIT_COPY_ALL,
+                            MF_BYCOMMAND | (filtered_.empty() ? MF_GRAYED : 0));
+        return;
+    }
+
+    if (view.m_hMenu != nullptr && menu.m_hMenu == view.m_hMenu) {
+        view.CheckMenuItem(ID_VIEW_GADGETS,
+                           MF_BYCOMMAND | (activeTab_ == 0 ? MF_CHECKED : 0));
+        view.CheckMenuItem(ID_VIEW_LOG,
+                           MF_BYCOMMAND | (activeTab_ == 1 ? MF_CHECKED : 0));
+    }
+}
+
+void MainDlg::OnMruFolder(UINT, int nID, CWindow) {
+    const size_t idx = static_cast<size_t>(nID - ID_MRU_FOLDER0);
+    if (idx < settings_.mruFolders.size())
+        ::SetDlgItemTextW(m_hWnd, IDC_FOLDER_COMBO,
+                          settings_.mruFolders[idx].c_str());
+}
+
+void MainDlg::OnMenuCopySelected(UINT, int, CWindow) {
+    CopyFocusedControl();
+}
+
+void MainDlg::OnMenuCopyAll(UINT, int, CWindow) {
+    CopyToClipboard(false);
+}
+
+void MainDlg::OnViewGadgets(UINT, int, CWindow) {
+    tab_.SetCurSel(0);
+    SetTab(0);
+}
+
+void MainDlg::OnViewLog(UINT, int, CWindow) {
+    tab_.SetCurSel(1);
+    SetTab(1);
+}
+
+void MainDlg::OpenOutputInExplorer() const {
+    const std::wstring path = GetDlgItemWText(m_hWnd, IDC_OUTPUT_PATH);
+    if (path.empty())
+        return;
+    // PerModule: open the directory. Single file: select it in Explorer.
+    if (IsDlgButtonChecked(IDC_SPLIT) == BST_CHECKED) {
+        ::ShellExecuteW(nullptr, L"open", L"explorer.exe", path.c_str(),
+                        nullptr, SW_SHOWNORMAL);
+    } else {
+        const std::wstring args = L"/select,\"" + path + L"\"";
+        ::ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(),
+                        nullptr, SW_SHOWNORMAL);
+    }
+}
+
+void MainDlg::OnOpenOutputFolder(UINT, int, CWindow) {
+    OpenOutputInExplorer();
+}
+
+void MainDlg::ShowAboutBox() {
+    CAboutTaskDialog dlg;
+    int selected = 0;
+    dlg.DoModal(m_hWnd, &selected);
+}
+
+void MainDlg::OnAbout(UINT, int, CWindow) {
+    ShowAboutBox();
 }
 
 // ---------------------------------------------------------------------------
@@ -734,14 +1144,12 @@ void MainDlg::SetTab(int index) {
 void MainDlg::ShowPane(int index) {
     // Gadgets pane
     const BOOL gadgets = (index == 0);
+    ::ShowWindow(GetDlgItem(IDC_FILTER_LBL), gadgets ? SW_SHOW : SW_HIDE);
     ::ShowWindow(GetDlgItem(IDC_FILTER), gadgets ? SW_SHOW : SW_HIDE);
     ::ShowWindow(GetDlgItem(IDC_MODULE_FILTER), gadgets ? SW_SHOW : SW_HIDE);
     ::ShowWindow(GetDlgItem(IDC_COPY), gadgets ? SW_SHOW : SW_HIDE);
     ::ShowWindow(GetDlgItem(IDC_RESULTS_COUNT), gadgets ? SW_SHOW : SW_HIDE);
     ::ShowWindow(GetDlgItem(IDC_LIST), gadgets ? SW_SHOW : SW_HIDE);
-    // Label above the filter edit ("Filter:")
-    ::ShowWindow(::GetWindow(GetDlgItem(IDC_FILTER), GW_HWNDPREV),
-                 gadgets ? SW_SHOW : SW_HIDE);
     ::ShowWindow(GetDlgItem(IDC_LOG), index == 1 ? SW_SHOW : SW_HIDE);
 }
 

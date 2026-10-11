@@ -83,9 +83,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ::InitCommonControlsEx(&icc);
 
     _Module.Init(nullptr, hInstance);
+    CMessageLoop loop;
+    _Module.AddMessageLoop(&loop);
 
+    // Modeless main window: our own pump lets menu accelerators (F5,
+    // Ctrl+1/2, Ctrl+E) translate, which the modal DialogBox loop cannot.
     gadgets::MainDlg dlg;
-    dlg.DoModal();
+    dlg.Create(nullptr);
+    dlg.ShowWindow(SW_SHOW);
+
+    const HACCEL hAccel =
+        ::LoadAcceleratorsW(hInstance, MAKEINTRESOURCEW(IDR_ACCEL));
+
+    MSG msg;
+    for (;;) {
+        const BOOL bRet = ::GetMessageW(&msg, nullptr, 0, 0);
+        if (bRet == 0 || bRet == -1)
+            break;
+        // Only keyboard messages need dialog-manager navigation; routing
+        // everything through IsDialogMessage lets it swallow non-input
+        // messages (WM_TIMER et al.) that it claims to "process".
+        if (msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST &&
+            ::IsDialogMessageW(dlg, &msg))
+            continue;
+        ::TranslateMessage(&msg);
+        ::DispatchMessageW(&msg);
+    }
+
+    if (dlg.IsWindow())
+        dlg.DestroyWindow();
+
+    _Module.RemoveMessageLoop();
 
     _Module.Term();
     ::CoUninitialize();

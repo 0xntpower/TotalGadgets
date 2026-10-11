@@ -28,7 +28,13 @@ stock System32 DLL sweep this typically yields **10–20% additional unique gadg
   crashed run leaves a well-formed partial file.
 - **Results browser** — virtual-mode list (handles millions of rows), live
   substring filter over disassembly / module / address, per-module and
-  scan-vs-mutated breakdown, Ctrl+C to clipboard.
+  scan-vs-mutated breakdown, sortable columns, right-click menu,
+  double-click-to-copy, Ctrl+C to clipboard.
+- **Native Win32 UI** — menu bar with MRU folders, status bar with live
+  counts/elapsed/ETA, Explorer-style progress (marquee while enumerating,
+  percent in the taskbar title), keyboard accelerators (F5 scan, Ctrl+1/2
+  tabs, Ctrl+E output folder, F1 about), window placement and column widths
+  persisted across runs.
 - **CLI mode** — same engine, scriptable: `TotalGadgets --cli ...` from any
   terminal (exit codes fit pipelines; Ctrl+C cancels gracefully).
 - **Three formats** — rp++-style text (default), JSON (with bytes + counts),
@@ -41,6 +47,35 @@ stock System32 DLL sweep this typically yields **10–20% additional unique gadg
 - **Built-in self-test** — `TotalGadgets --selftest` exercises the engine,
   mutation pass, all sinks, bad-byte filtering, and cancellation against
   synthetic x64 + x86 PEs. No fixtures needed.
+
+## Performance
+
+v2.1 rewrote the hot paths. Measured A/B, original vs new, same machine:
+
+| Workload | Before | After |
+|---|---|---|
+| 120-DLL folder sweep, scan + mutation (8 threads) | 20.7-25.5 s | 16.1-17.6 s (**~25% faster**) |
+| 3 large DLLs, mutation pass (8 threads) | 6.2-7.1 s | 5.3-5.8 s (**~15-20% faster**) |
+| `--selftest` (many small engine runs) | 5.0 s | 0.5 s (**10x faster**) |
+
+Where it comes from:
+
+- **One file open per binary** where there were up to five (magic sniff, PE
+  machine type, ELF machine, size stat, full metadata re-read), plus
+  header-only PE metadata reads in the scan phase — a few KB instead of
+  re-reading every byte.
+- **capstone `cs_disasm_iter`** with per-thread instruction buffers: no
+  malloc/free per candidate and decoding stops at the first rejected
+  instruction instead of eagerly decoding the whole window.
+- **Output sinks format into memory** and write one 1 MB-buffered block per
+  module instead of a stream-op per gadget.
+- **Filtering**: case-fold lookup table + first-character scanning; keystroke
+  filtering over huge result sets is debounced (150 ms).
+- **Build**: `/O2 /GL` + `/LTCG` + `/OPT:REF /OPT:ICF` + `/GA`, static CRT.
+
+The mutation pass is now deterministic: identical disassembly found at
+several addresses always resolves to the lowest address, independent of
+thread scheduling.
 
 ## Bad bytes semantics
 
